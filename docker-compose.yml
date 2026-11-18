@@ -1,0 +1,73 @@
+services:
+  postgres:
+    # Pulled via the mirror.gcr.io pull-through cache rather than docker.io
+    # directly: some networks/ISPs cannot resolve docker.io's CDN domain
+    # (production.cloudfront.docker.com) even though the registry API itself
+    # is reachable. Swap back to `pgvector/pgvector:pg16` if your network
+    # doesn't need this.
+    image: mirror.gcr.io/pgvector/pgvector:pg16
+    container_name: agentic_rag_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentic_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-agentic_rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    ports:
+      - "${POSTGRES_PORT:?set POSTGRES_PORT in .env}:${POSTGRES_CONTAINER_PORT:?set POSTGRES_CONTAINER_PORT in .env}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-agentic_rag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: agentic_rag_qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:?set QDRANT_HTTP_PORT in .env}:${QDRANT_HTTP_CONTAINER_PORT:?set QDRANT_HTTP_CONTAINER_PORT in .env}"
+      - "${QDRANT_GRPC_PORT:?set QDRANT_GRPC_PORT in .env}:${QDRANT_GRPC_CONTAINER_PORT:?set QDRANT_GRPC_CONTAINER_PORT in .env}"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  adminer:
+    image: mirror.gcr.io/library/adminer:latest
+    container_name: agentic_rag_adminer
+    restart: unless-stopped
+    ports:
+      - "${ADMINER_PORT:?set ADMINER_PORT in .env}:${ADMINER_CONTAINER_PORT:?set ADMINER_CONTAINER_PORT in .env}"
+    depends_on:
+      - postgres
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        API_CONTAINER_PORT: ${API_CONTAINER_PORT:?set API_CONTAINER_PORT in .env}
+    container_name: agentic_rag_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override the host-side values from .env: inside the compose network,
+      # Postgres/Qdrant are reached by service name on their *internal*
+      # ports, not the remapped host ports used outside the network.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_CONTAINER_PORT:?set POSTGRES_CONTAINER_PORT in .env}
+      QDRANT_URL: http://qdrant:${QDRANT_HTTP_CONTAINER_PORT:?set QDRANT_HTTP_CONTAINER_PORT in .env}
+    ports:
+      - "${API_PORT:?set API_PORT in .env}:${API_CONTAINER_PORT:?set API_CONTAINER_PORT in .env}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+
+volumes:
+  postgres_data:
+  qdrant_data:
